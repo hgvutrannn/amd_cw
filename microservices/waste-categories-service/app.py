@@ -20,7 +20,7 @@ app = FastAPI(
 SECRET_KEY = "your_secret_key"  # Replace with your actual secret key
 ALGORITHM = "HS256"
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login") # save authorization token here
 
 async def verify_admin_role(token: str = Depends(oauth2_scheme)):
     try:
