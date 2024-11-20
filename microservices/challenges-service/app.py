@@ -1,85 +1,114 @@
-from fastapi import FastAPI, Body, HTTPException, status
-from fastapi.responses import Response
-from bson import ObjectId
-import motor.motor_asyncio
-from pymongo import ReturnDocument
-from model import ChallengeModel, ChallengeCollection, UpdateChallengeModel
+from fastapi import FastAPI, HTTPException, Depends
+from pymongo import MongoClient
+from model import *
+from jose import jwt, JWTError
+from typing import List
+from datetime import datetime
+from fastapi.security import OAuth2PasswordBearer
 
 app = FastAPI(
     title="Challenges API",
     summary="API for managing educational challenges related to waste sorting.",
 )
 
-MONGO_URL = "mongodb+srv://hoangvutrannn:77pCHwjv1OwdqKuh@cluster1.7plzt.mongodb.net/?retryWrites=true&w=majority&appName=Cluster1"
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+client = MongoClient("mongodb+srv://hoangvutrannn:77pCHwjv1OwdqKuh@cluster1.7plzt.mongodb.net/?retryWrites=true&w=majority&appName=Cluster1")   
 db = client["sorting-waste-app"]  # name of the database
 challenges_collection = db.get_collection("Challenges")  # collection name
 
-@app.post(
-    "/challenges/",
-    response_description="Add new challenge",
-    response_model=ChallengeModel,
-    status_code=status.HTTP_201_CREATED,
-    response_model_by_alias=False,
-)
-async def create_challenge(challenge: ChallengeModel = Body(...)):
-    new_challenge = await challenges_collection.insert_one(
-        challenge.model_dump(by_alias=True, exclude=["id"])
-    )
-    created_challenge = await challenges_collection.find_one(
-        {"_id": new_challenge.inserted_id}
-    )
-    return created_challenge
+SECRET_KEY = "your_secret_key"  # Replace with your actual secret key
+ALGORITHM = "HS256"
 
-@app.get(
-    "/challenges/",
-    response_description="List all challenges",
-    response_model=ChallengeCollection,
-    response_model_by_alias=False,
-)
-async def list_challenges():
-    return ChallengeCollection(challenges=await challenges_collection.find().to_list(1000))
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")  # save authorization token here
 
-@app.get(
-    "/challenges/{id}",
-    response_description="Get a single challenge",
-    response_model=ChallengeModel,
-    response_model_by_alias=False,
-)
-async def show_challenge(id: str):
-    if (
-        challenge := await challenges_collection.find_one({"_id": ObjectId(id)})
-    ) is not None:
-        return challenge
-    raise HTTPException(status_code=404, detail=f"Challenge {id} not found")
+async def verify_admin_role(token: str = Depends(oauth2_scheme)):
+    try:
+        # Decode the JWT
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        role = payload.get("role")
+        exp = payload.get("exp")
 
-@app.put(
-    "/challenges/{id}",
-    response_description="Update a challenge",
-    response_model=ChallengeModel,
-    response_model_by_alias=False,
-)
-async def update_challenge(id: str, challenge: UpdateChallengeModel = Body(...)):
+        # Check if required fields exist
+        if not email or not role or not exp:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Check if the token is expired
+        if datetime.utcnow().timestamp() > exp:
+            raise HTTPException(status_code=401, detail="Token has expired")
+
+        # Check if the role is admin
+        if role != "admin":
+            raise HTTPException(status_code=403, detail="Admin privileges required")
+
+        return email  # Optionally return email for further use
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+@app.post("/createchallenges",response_model=ChallengeResponse,response_description="Add new challenge",)
+async def create_challenge(challenge: ChallengeRequest, email: str = Depends(verify_admin_role)):
+    if challenges_collection.find_one({"name": challenge.name}):
+            raise HTTPException(status_code=400, detail=f"Challenge name is already exists.")
     challenge_data = {
-        k: v for k, v in challenge.model_dump(by_alias=True).items() if v is not None
-    }
-    if len(challenge_data) >= 1:
-        update_result = await challenges_collection.find_one_and_update(
-            {"_id": ObjectId(id)},
-            {"$set": challenge_data},
-            return_document=ReturnDocument.AFTER,
-        )
-        if update_result is not None:
-            return update_result
-        else:
-            raise HTTPException(status_code=404, detail=f"Challenge {id} not found")
-    if (existing_challenge := await challenges_collection.find_one({"_id": ObjectId(id)})) is not None:
-        return existing_challenge
-    raise HTTPException(status_code=404, detail=f"Challenge {id} not found")
+            "name": challenge.name,
+            "description": challenge.description,
+            "guidelines": challenge.guidelines
+        }
+    # Insert challenge into the database
+    result = challenges_collection.insert_one(challenge_data)
+    created_challenge = challenges_collection.find_one({"_id": result.inserted_id})
+    return ChallengeResponse(id=str(created_challenge["_id"]), name=created_challenge["name"], description=created_challenge["description"], guidelines=created_challenge["guidelines"])
 
-@app.delete("/challenges/{id}", response_description="Delete a challenge")
-async def delete_challenge(id: str):
-    delete_result = await challenges_collection.delete_one({"_id": ObjectId(id)})
-    if delete_result.deleted_count == 1:
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-    raise HTTPException(status_code=404, detail=f"Challenge {id} not found")
+
+@app.get("/getallchallenges",response_description="List all challenges",response_model=List[ChallengeResponse])
+async def get_all_challenges():
+    categories = challenges_collection.find()
+    result = [
+        ChallengeResponse(
+            id=str(category["_id"]),
+            name=category["name"],
+            description=category["description"],
+            guidelines=category["guidelines"]
+        ) for category in categories
+    ]
+    return result
+
+@app.put("/updatechallenges", response_model=ChallengeResponse, response_description="Update new Challenges (Only Admin)")
+async def update_challenge(challenge_update: ChallengeRequest, email: str=Depends(verify_admin_role)):
+    # Check if the challenge exists
+    existing_category = challenges_collection.find_one({"name": challenge_update.name})
+    if not existing_category:
+        raise HTTPException(status_code=404, detail="Challenge not found.")
+
+    # Prepare the update data
+    update_data = {}
+    if challenge_update.description:
+        update_data["description"] = challenge_update.description
+    if challenge_update.guidelines:
+        update_data["guidelines"] = challenge_update.guidelines
+
+    # Perform the update
+    updated_category = challenges_collection.find_one_and_update(
+        {"name": challenge_update.name},
+        {"$set": update_data},  # Use $set to update fields
+        return_document=True  # Return the updated document
+    )
+
+    if not updated_category:
+        raise HTTPException(status_code=404, detail="Failed to update the challenge.")
+
+    # Return the updated category
+    return ChallengeResponse(
+        id=str(updated_category["_id"]),
+        name=updated_category["name"],
+        description=updated_category["description"],
+        guidelines=updated_category["guidelines"]
+    )
+
+# **4. Delete a Challenge by Name**
+@app.delete("/deletechallenges", response_model=dict, response_description="Delete Challenge (Only Admin)")
+async def delete_challenge(name: str, email: str=Depends(verify_admin_role)):
+    # Delete the Challenge
+    result = challenges_collection.delete_one({"name": name})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Challenge not found.")
+    return {"message": f"Challenge '{name}' deleted successfully."}

@@ -1,6 +1,5 @@
+passlib
 fastapi
-motor
-pydantic
 pymongo
-typing_extensions
+python-jose
 uvicorn
